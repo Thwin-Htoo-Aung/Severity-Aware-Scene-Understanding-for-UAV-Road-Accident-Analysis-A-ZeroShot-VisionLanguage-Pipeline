@@ -1,220 +1,212 @@
-# DroneAmbulanceAI
+# Severity Detection — VISTA Challenge Submission
 
-Part of the **VISTA** project (University of Bari Aldo Moro — Italian Ministry of Infrastructure and Transport). VISTA dispatches an AI-equipped UAV to road accident scenes ahead of first responders, giving paramedics situational awareness before they arrive.
-
-This repository contains two complementary systems built on top of the **CrashVista** dataset:
-
-1. **Static detection** — benchmark of zero-shot and fine-tuned detectors on UAV accident imagery.
-2. **Video pipeline** — frame-by-frame tracking and grounded captioning of accident-scene video.
+**Course**: Computer Vision — MSc Computer Science, University of Bari Aldo Moro  
+**Challenge**: VISTA — UAV-based Road Accident Scene Understanding  
+**Assignment**: Severity-aware captioning pipeline (Detect → Track → Caption)
 
 ---
 
-## Repository Structure
+## 1. Challenge Requirements
 
-```
-DroneAmbulanceAI/
-├── vista/
-│   ├── models/             # Detection model wrappers
-│   │   ├── yolo.py         # YOLOVista  (YOLO family)
-│   │   ├── yoloe.py        # YOLOEVista (YOLOe)
-│   │   ├── moondream.py    # MoonDream  (multimodal LM)
-│   │   ├── omdetturbo.py   # OmDetTurbo (open-vocabulary)
-│   │   ├── rtdetr.py       # RT-DETR
-│   │   ├── sam/            # SAM 3 + linear probe
-│   │   ├── validator.py    # VISTAValidator / VISTAOutputMixin
-│   │   └── __init__.py     # MODEL_ZOO + get_model()
-│   ├── pipeline/
-│   │   ├── base.py         # VistaPipeline ABC, Detection, FrameResult
-│   │   ├── qwen_yolo.py    # QwenYoloPipeline (YOLO tracker + Qwen-VL)
-│   │   └── __init__.py
-│   ├── qwen.py             # Qwen-VL model loader (HF + vLLM + Unsloth)
-│   ├── evaluate.py         # run() — train / val entry point
-│   └── stats.py            # YOLO dataset statistics
-├── config/                 # Experiment YAML configs
-│   ├── VistaSynth/         # Detection benchmark configs
-│   ├── qwenyolo/           # Video pipeline configs
-│   └── sim18/              # Simulation sequence configs
-├── main.py                 # CLI: run | grid | stats
-├── qwen_yolo.py            # Standalone video pipeline entry point
-├── app.py                  # Streamlit dataset explorer
-└── eval.py                 # Quick one-shot evaluation script
-```
+| Requirement | Status |
+|---|---|
+| Subclass `VistaPipeline`, implement `forward()` + `reset()` | ✅ `vista/pipeline/severity.py` |
+| Detect vehicles and persons in every frame | ✅ YOLO tracking every frame |
+| Assign persistent `track_id` per object | ✅ YOLO `.track(persist=True)` |
+| Caption each track with a severity label | ✅ Qwen-VL zero-shot per-crop |
+| ≥ 5 FPS on the shallow (detection/tracking) stage | ✅ Measured in `colab_run.ipynb` cell 8 |
+| Zero-shot constraint on captioner | ✅ VLM never sees VISTA ground-truth labels |
+| `predictions_tracks.csv` output | ✅ `video_id, track_id, frame_start, frame_end, caption` |
+| `predictions_mot.csv` output | ✅ `video_id, frame_id, track_id, x1, y1, x2, y2, conf, category` |
+| Primary metric: BERTScore-F1 | ✅ Evaluated in `colab_run.ipynb` cell 9 |
+| Tie-breakers: MOTA and IDF1 | ✅ Derivable from `predictions_mot.csv` |
 
 ---
 
-## Installation
+## 2. Inspiration from the Paper
 
-Requires **Python 3.10.13**. Dependencies are managed with [uv](https://github.com/astral-sh/uv).
+This implementation is directly motivated by the limitations and future directions identified in:
 
-```bash
-# install uv if needed
-pip install uv
+> *"Towards Real-Time Drone Vision for Road Safety"*, De Marinis et al., University of Bari Aldo Moro / Ministry of Infrastructure and Transport.
 
-# create the virtual environment and install all dependencies
-uv sync
-```
+The paper introduces **CrashVista** (1,000 annotated UAV images) and benchmarks detection models across zero-shot and fine-tuned paradigms. Its **Section 5 (Future Work)** explicitly identifies two gaps that this severity pipeline addresses:
 
-A GPU with at least 16 GB VRAM is recommended. The Qwen-VL models require 24–80 GB depending on the variant.
+> *"A second research direction concerns the development of modules for assessing accident severity. Beyond binary detection, estimating the severity of a crash and the potential involvement of injured individuals would significantly enhance the system's utility for emergency response."*
 
----
+> *"We also plan to enrich the annotation scheme by introducing fine-grained, instance-level descriptions for each detected object (e.g., 'person lying on the ground', 'vehicle severely damaged', 'person standing nearby')."*
 
-## Detection Models
-
-All detection models are registered in `vista/models/__init__.py` and share the Ultralytics `predict` / `val` / `set_classes` interface. Validation automatically writes structured outputs (`metrics_summary.json`, `pr_curves.json`, `speed_summary.json`, etc.) to the run directory via `VISTAOutputMixin`.
-
-| Key | Class | Backend | Notes |
-|---|---|---|---|
-| `yolo` | `YOLOVista` | Ultralytics YOLO | YOLO 11/12/26 family |
-| `yoloe` | `YOLOEVista` | Ultralytics YOLOe | Open-vocabulary; supports `set_classes` |
-| `moondream` | `MoonDream` | HuggingFace | Compact multimodal LM |
-| `omdetturbo` | `OmDetTurbo` | HuggingFace | Real-time open-vocab transformer |
-| `rtdetr` | `RTDETRVista` | Ultralytics RT-DETR | Transformer detector |
-| `sam` | `Sam3Model` | Meta SAM 3 | Segmentation → detection; supports linear probe |
-
-### Running an evaluation
-
-```bash
-python main.py run --parameters config/VistaSynth/base.yaml
-```
-
-Config format:
-
-```yaml
-model:
-  name: yoloe
-  model: yoloe-26s-seg.pt
-
-classes: ["crashed_car", "person", "car"]
-
-val:
-  data: data/VistaSynth/data.yaml
-  split: test
-```
-
-### Running a grid search
-
-```bash
-python main.py grid --parameters config/VistaSynth/base.yaml
-```
-
-Grid configs use a `parameters` block where each key can be a list of values; the CLI expands all combinations and runs them sequentially (or in parallel with `--parallel`).
+My implementation directly operationalises these two future directions within the constraints of the challenge.
 
 ---
 
-## Video Pipeline
+## 3. What I Built
 
-The `vista/pipeline/` module provides an abstract interface for all video-level systems. Any pipeline must subclass `VistaPipeline` and implement `forward`:
+### 3.1 Architecture — Three Stages
+
+```
+UAV Video
+    │
+    ▼ (every frame)
+┌──────────────────────────────────────┐
+│  Stage 1 — YOLO Detection + Tracking │  ← shallow stage (≥ 5 FPS)
+│  • Locates vehicles and persons       │
+│  • Assigns persistent track_id        │
+│  • Initial label from YOLO class name │
+│    (crashed_car → "heavily damaged")  │
+└──────────────┬───────────────────────┘
+               │ (every N frames, default N=30)
+               ▼
+┌──────────────────────────────────────┐
+│  Stage 2 — Qwen-VL Crop Captioning   │  ← zero-shot, no VISTA labels
+│  • Crops each track's bounding box   │
+│  • Sends crop + category prompt      │
+│  • Returns a severity label string   │
+└──────────────┬───────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────┐
+│  Stage 3 — peak_severity()           │  ← conservative aggregation
+│  • Retains the worst observed state  │
+│  • Never downgrades a track's status │
+└──────────────────────────────────────┘
+               │
+       ┌───────┴────────┐
+       ▼                ▼
+predictions_tracks.csv  predictions_mot.csv
+```
+
+### 3.2 Severity Vocabularies (`vista/utils/severity.py`)
+
+Two controlled vocabularies, **ordered by severity rank** (higher index = more severe):
+
+**Vehicles**
+```
+0: undamaged
+1: minor damage
+2: heavily damaged
+3: overturned
+4: on fire
+```
+
+**Persons**
+```
+0: standing
+1: running
+2: helping
+3: calling for help
+4: injured, sitting
+5: injured, lying
+6: unconscious
+```
+
+**Emergency vehicles** (reclassified from trucks/buses by the VLM)
+```
+ambulance on scene | fire truck on scene | police on scene | emergency vehicle
+```
+
+### 3.3 Zero-Shot Prompts
+
+Three category-specific prompts are defined in `vista/utils/severity.py`:
+
+- `vehicle_severity_prompt()` — asks the VLM to pick the single best match from the vehicle vocabulary
+- `person_severity_prompt()` — asks the VLM to pick the single best match from the person vocabulary
+- `emergency_vehicle_prompt()` — probes trucks/buses to detect ambulances/police cars before applying severity
+
+The system prompt in `cfg_severity.yaml` constrains the VLM to reply with **only the label**, no explanation.
+
+### 3.4 Peak Severity Aggregation
 
 ```python
-from vista.pipeline import VistaPipeline, FrameResult, Detection
-from PIL import Image
-
-class MyPipeline(VistaPipeline):
-
-    def forward(self, frame: Image.Image, frame_idx: int) -> FrameResult:
-        ...
-        return FrameResult(
-            detections=[
-                Detection(
-                    bbox=(x1, y1, x2, y2),
-                    category="person",
-                    confidence=0.9,
-                    track_id=42,
-                    caption="injured, sitting",
-                )
-            ],
-            frame_idx=frame_idx,
-        )
-
-    def reset(self) -> None:
-        ...  # clear tracker state between videos
+def peak_severity(captions: list[str], category: str) -> str:
+    rank = _PERSON_RANK if category == "person" else _VEHICLE_RANK
+    scored = [(rank.get(c, -1), c) for c in captions]
+    return max(scored, key=lambda x: x[0])[1]
 ```
 
-The harness calls `reset()` once before each video and `pipeline(frame, frame_idx)` for every frame. The convenience method `process_video(path)` wraps this loop and yields `FrameResult` objects:
+**Rationale**: In emergency dispatch, a state once observed must not be forgotten. If a person is detected `unconscious` at frame 150 and the VLM misses them at frame 180, the track should still report `unconscious`. This conservative strategy is appropriate for first-responder use.
 
-```python
-pipeline = MyPipeline(...)
-for result in pipeline.process_video("accident.mp4"):
-    for det in result.detections:
-        print(det.track_id, det.category, det.caption)
-```
+### 3.5 Emergency Vehicle Reclassification
 
-### QwenYoloPipeline
+YOLO does not have an `ambulance` class. Trucks and buses are sent to the VLM with a dedicated probe before severity scoring. If confirmed as an emergency vehicle, they are reclassified to category `emergency_vehicle` and skip the severity ranking entirely.
 
-The reference implementation fuses YOLO tracking with Qwen-VL captioning:
+### 3.6 Initial Severity Bootstrap from YOLO
 
-```python
-from ultralytics import YOLO
-from vista.pipeline.qwen_yolo import QwenYoloPipeline
-from vista.qwen import get_model
+The fine-tuned YOLO model on VistaCrash provides a free binary severity signal:
 
-cfg = { ... }  # YAML config dict
-pipeline = QwenYoloPipeline(
-    yolo_model=YOLO("yolo12x.pt"),
-    qwen_model=get_model(cfg),
-    caption_stride=30,
-    iou_threshold=0.3,
-)
-for result in pipeline.process_video("accident.mp4"):
-    ...
-```
+| YOLO class | Initial caption | Category |
+|---|---|---|
+| `crashed_car` | `heavily damaged` | `car` |
+| `car` | `undamaged` | `car` |
+| `person` | `standing` | `person` |
+| `truck` | `undamaged` | `car` (may become `emergency_vehicle`) |
 
-Or run it directly from a YAML config:
-
-```bash
-python qwen_yolo.py --config config/qwenyolo/cfg10.yaml
-```
-
-Key config options:
-
-```yaml
-input:
-  video: data/sequences/accident.mp4
-  start_frame: 0          # or "1:30" (min:sec)
-  end_frame: 900
-
-output:
-  dir: out/my_run
-
-yolo:
-  model: yolo12x.pt
-  iou_match_threshold: 0.3
-  conf: 0.05
-
-qwen:
-  model_id: Qwen/Qwen3-VL-8B-Instruct
-  every_n_frames: 30
-  max_new_tokens: 4096
-  system_prompt: >
-    You are an operator supervising a drone over an accident scene...
-```
-
-The pipeline saves:
-- `annotated.mp4` — video with bounding boxes and captions overlaid
-- `qwen/<frame>_raw.txt` — raw VLM output per queried frame
-- `qwen/<frame>_repaired.json` — JSON-repaired structured detections
-- `qwen/<frame>_annotated.png` — per-frame Qwen detection overlay
+This means even **before** the VLM runs, tracks have a meaningful severity label.
 
 ---
 
-## Dataset Statistics
+## 4. Files Modified / Created
 
-Compute and save full statistics for any YOLO-format dataset:
-
-```bash
-python main.py stats data/VistaSynth/data.yaml --output_dir stats/ --splits train,val,test
-```
-
-Outputs: class distribution plots, bounding-box scatter, spatial heatmaps, aspect-ratio histograms, co-occurrence matrix, per-class CSV — all as SVG/PNG.
+| File | Role |
+|---|---|
+| `vista/utils/severity.py` | Severity vocabularies, prompts, `peak_severity()`, YOLO bootstrap maps |
+| `vista/pipeline/severity.py` | `SeverityPipeline` — full VistaPipeline subclass |
+| `vista/pipeline/__init__.py` | Exports `SeverityPipeline` |
+| `vista/qwen.py` | Added `caption_crop(crop, prompt)` to `QwenVLHF` and `QwenVLUnsloth` |
+| `qwen_yolo.py` | Fixed missing `csv` import, `frame_start/end` tracking, `conf` collection, FPS measurement, correct CSV export |
+| `config/qwenyolo/cfg_severity.yaml` | Severity-focused config: 32-token max, 512px crops, controlled system prompt |
+| `colab_run.ipynb` | Full Google Colab runner: install, run, FPS benchmark, BERTScore evaluation |
 
 ---
 
-## Dataset Explorer
+## 5. How to Run
 
-A Streamlit app for browsing images with annotation overlays and inspecting dataset statistics interactively:
-
-```bash
-streamlit run app.py
+### Google Colab (T4 GPU)
+```
+1. Upload VISTA.rar to Google Drive
+2. Open colab_run.ipynb in Colab
+3. Runtime → Change runtime type → T4 GPU
+4. Run cells 1 → 11 in order
 ```
 
-Enter the path to any YOLO `data.yaml` file in the sidebar. The **Statistics** tab shows all the plots above; the **Explorer** tab lets you filter by split, class, and annotation count, and navigate images one by one or in a grid.
+### Locally
+```bash
+python qwen_yolo.py --config config/qwenyolo/cfg_severity.yaml
+```
+
+### FPS Benchmark (shallow stage)
+Cell 8 of `colab_run.ipynb` measures YOLO-only throughput over 100 frames after a 10-frame warmup. This is the stage the challenge requires ≥ 5 FPS on.
+
+---
+
+## 6. Limitations
+
+### 6.1 VLM Latency
+The Qwen-VL captioning stage runs every N frames (default: 30). This keeps the **shallow stage** well above 5 FPS, but the **total pipeline FPS** is dominated by VLM inference time. On a T4 GPU with `Qwen2.5-VL-7B-Instruct-bnb-4bit`, each Qwen call takes ~1–3 seconds, meaning the effective captioning rate is low for videos with many tracks.
+
+### 6.2 Vocabulary Rigidity
+The severity prompts constrain the VLM to a fixed vocabulary. This improves BERTScore consistency but may miss nuanced descriptions (e.g., "partially trapped under vehicle") that could score higher against free-form ground truth.
+
+### 6.3 YOLO Class Dependency
+The bootstrap severity signal (`crashed_car` → `heavily damaged`) requires a YOLO model fine-tuned on VistaCrash. If using the base `yolo12x.pt`, all vehicles start as `undamaged` until the VLM refines them.
+
+### 6.4 No Temporal Smoothing Beyond Peak
+`peak_severity` prevents downgrades but does not smooth noisy intermediate outputs. A single VLM hallucination (e.g., `on fire` on a clear frame) permanently sets a track to the highest severity.
+
+### 6.5 Single-Crop Context
+The VLM receives only the cropped bounding box, not the full scene. This limits contextual reasoning — a person next to a heavily damaged car could be better assessed with scene-level context.
+
+### 6.6 Emergency Vehicle Probe Cost
+Trucks and buses trigger two VLM calls (emergency probe + severity prompt). In dense scenes this doubles captioning time for those tracks.
+
+---
+
+## 7. Evaluation Metrics
+
+| Metric | What it measures | Target |
+|---|---|---|
+| **BERTScore-F1** (primary) | Semantic similarity between predicted captions and ground truth | Maximize |
+| **MOTA** (tie-breaker) | Tracking accuracy: penalises FP, FN, ID switches | Maximize |
+| **IDF1** (tie-breaker) | Consistency of track IDs over time | Maximize |
+| **FPS** (constraint) | Shallow stage throughput (YOLO only) | ≥ 5 FPS |
+
+BERTScore is computed on the `caption` column of `predictions_tracks.csv`. It is **semantic**, not lexical — `"injured, sitting"` and `"person seated on ground"` score highly against each other, which rewards expressive, natural-language severity labels over keyword-only outputs.
